@@ -1,0 +1,20 @@
+{
+  "red": {
+    "L_center": 150.1,
+    "A_center": 126.8,
+    "B_center": 131.3,
+    "radius_ab": 6.878829422805582
+  },
+  "blue": {
+    "L_center": 50,
+    "A_center": -20,
+    "B_center": -25,
+    "radius_ab": 15
+  },
+  "green": {
+    "L_center": 60,
+    "A_center": -30,
+    "B_center": 30,
+    "radius_ab": 15
+  }
+}
