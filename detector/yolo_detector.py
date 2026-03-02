@@ -19,4 +19,6 @@ class YoloDetector:
             tracker=tracker,
             verbose=False,
             persist=True,
+            imgsz=480,          # 640→480: inference %30 hızlanır
+            vid_stride=1,       # Her frame'i işle
         )

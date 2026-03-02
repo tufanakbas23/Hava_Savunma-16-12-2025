@@ -18,7 +18,7 @@ class ArduinoInterface:
         Durum:    ?  ->  STATUS,MODE={AUTO|MANUAL},P{pan},T{tilt},F{fire},ENABLED={0|1}
     """
     
-    def __init__(self, port="COM3", baudrate=115200, timeout=0.1):
+    def __init__(self, port="COM4", baudrate=115200, timeout=0.1):
         self.port = port
         self.baudrate = baudrate
         self.ser = None
@@ -210,7 +210,7 @@ class ArduinoInterface:
         lines = response.strip().split("\n")
         for line in lines:
             line = line.strip()
-            if line.startswith("OK,P") or line.startswith("STATUS,"):
+            if line.startswith("OK,P") or line.startswith("STATUS,") or line.startswith("S,"):
                 # Pozisyon bilgisini çıkar
                 try:
                     if "P" in line:
@@ -294,7 +294,22 @@ class ArduinoInterface:
             "raw": response
         }
         
-        if "STATUS" in response:
+        if response.startswith("S,"):
+            # Yeni format: S,mode,pan,tilt,fire,enabled
+            try:
+                parts = response.split(",")
+                if len(parts) >= 6:
+                    status["mode"] = "AUTO" if parts[1] == "1" else "MANUAL"
+                    self.autonomous_mode = (parts[1] == "1")
+                    status["pan"] = int(parts[2]) / 10.0
+                    status["tilt"] = int(parts[3]) / 10.0
+                    status["fire"] = (parts[4] == "1")
+                    status["enabled"] = (parts[5].strip() == "1")
+                    self.motors_enabled = status["enabled"]
+            except (ValueError, IndexError):
+                pass
+        elif "STATUS" in response:
+            # Eski format: STATUS,MODE=AUTO,P450,T-150,F0,ENABLED=1
             if "MODE=AUTO" in response:
                 status["mode"] = "AUTO"
                 self.autonomous_mode = True

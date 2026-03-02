@@ -1,6 +1,5 @@
 """
-Base Stage Engine - Sadece IBVS (PD kaldırıldı)
-Belgede: Bölüm 3.1, 4, 13
+Base Stage Engine - Basit P Kontrol + Lead Prediction + Feedforward
 """
 
 import time
@@ -8,9 +7,7 @@ import cv2
 import numpy as np
 from detector.yolo_detector import YoloDetector
 from classify.size_classifier import SizeClassifier
-from control.ibvs_controller import IBVSController, VelocityTransformer
-from control.depth_estimator import DepthEstimator
-from control.motion_compensator import MotionCompensator
+from control.ibvs_controller import IBVSController
 from config.system_config import SystemConfig
 
 
@@ -28,7 +25,6 @@ class BaseStageEngine:
 
         # ===== KAMERA MODU (SystemConfig'den) =====
         self.camera_on_turret = SystemConfig.CAMERA_ON_TURRET
-        self.use_full_ibvs = SystemConfig.USE_FULL_IBVS
         
         # ===== Kontrol Parametreleri (SystemConfig'den) =====
         self.LEAD_TIME_S = SystemConfig.LEAD_TIME_S
@@ -41,43 +37,12 @@ class BaseStageEngine:
         self.HFOV_DEG = SystemConfig.HFOV_DEG
         self.VFOV_DEG = SystemConfig.VFOV_DEG
 
-        # ===== IBVS Adaptif PD Controller =====
-        self.ibvs_controller = IBVSController(
-            lambda_min=SystemConfig.LAMBDA_MIN,
-            lambda_max=SystemConfig.LAMBDA_MAX,
-            kd_gain=SystemConfig.KD_GAIN
-        )
+        # ===== Basit P Kontrol =====
+        self.ibvs_controller = IBVSController(kp=SystemConfig.KP)
 
-        # ===== Depth Estimator (Belgede: Bölüm 5.3) =====
-        self.depth_estimator = DepthEstimator(
-            camera_height_m=2.0,
-            tilt_singularity_deg=5.0,
-            bbox_depth_coeff=5.0,
-            depth_min_m=1.0,
-            depth_max_m=15.0,
-        )
-
-        # ===== Motion Compensator (Belgede: Bölüm 4 - Katman 3) =====
-        self.motion_compensator = MotionCompensator(
-            hfov_deg=self.HFOV_DEG,
-            vfov_deg=self.VFOV_DEG,
-            frame_width=1280,  # 720p
-            frame_height=720,
-            omega_lowpass_alpha=0.3,
-        )
-
-        # ===== Velocity Transformer (Belgede: Bölüm 5.4, 5.5) =====
-        self.velocity_transformer = VelocityTransformer(
-            hfov_deg=self.HFOV_DEG,
-            vfov_deg=self.VFOV_DEG,
-            frame_width=1280,  # 720p
-            frame_height=720,
-        )
-
-        # ===== Lead prediction (Belgede: Bölüm 6.4) =====
-        self.LEAD_TIME_BASE = 0.15
-        self.LOCK_TOLERANCE_PIX = 10
-        self.LOCK_DURATION_FRAMES = 10
+        # Lock
+        self.LOCK_TOLERANCE_PIX = SystemConfig.LOCK_TOLERANCE_PIX
+        self.LOCK_DURATION_FRAMES = SystemConfig.LOCK_DURATION_FRAMES
         self.lock_frame_counter = 0
 
         # State
@@ -91,14 +56,18 @@ class BaseStageEngine:
 
     def calculate_fps(self):
         now = time.time()
-        fps = 1 / (now - self.prev_time) if (now - self.prev_time) > 0 else 0
+        dt = now - self.prev_time
+        instant_fps = 1 / dt if dt > 0 else 0
+        # Hareketli ortalama: yumuşak gösterim
+        if not hasattr(self, '_smooth_fps'):
+            self._smooth_fps = instant_fps
+        self._smooth_fps = 0.1 * instant_fps + 0.9 * self._smooth_fps
         self.prev_time = now
         self.frame_counter += 1
-        return fps
+        return self._smooth_fps
 
-    def draw_crosshair(self, frame, color=(0, 255, 0), size=15):
-        h, w = frame.shape[:2]
-        cx, cy = w // 2, h // 2
+    def draw_crosshair(self, frame, color=(0, 255, 0), size=3):
+        cx, cy = 320, 240
         cv2.line(frame, (cx - size, cy), (cx + size, cy), color, 2)
         cv2.line(frame, (cx, cy - size), (cx, cy + size), color, 2)
 
@@ -139,55 +108,22 @@ class BaseStageEngine:
             depth_m (float): Tahmini derinlik (metre)
         """
         h, w = frame_height, frame_width
-        cx, cy = w / 2, h / 2
+        cx, cy = 320, 240  # Kameranın orta noktası
+        depth_m = 5.0  # Sabit derinlik (kullanılmasa da dönüş değeri için)
         
         # Hedefin merkeze olan piksel hatası
         error_x = target_x - cx  # Pozitif = hedef sağda
         error_y = target_y - cy  # Pozitif = hedef aşağıda
         
         if self.camera_on_turret:
-            # ===== HAREKETLİ KAMERA =====
+            # ===== HAREKETLİ KAMERA: P Kontrol + Lead Prediction + Feedforward =====
             
-            if self.use_full_ibvs:
-                # ===== FULL IBVS: Motion Compensation + Lead Prediction =====
-                
-                # KATMAN 2: Depth Estimation
-                tilt_angle_deg = self.arduino.tilt_deg
-                depth_m = self.depth_estimator.estimate_depth_hybrid(
-                    tilt_angle_deg, bbox_height, h
-                )
-
-                # KATMAN 3: Motion Compensation
-                omega_pan, omega_tilt = self.arduino.get_omega()
-                self.motion_compensator.update_omega_smooth(omega_pan, omega_tilt)
-                vx_comp_pix, vy_comp_pix = self.motion_compensator.compensate_velocity(
-                    vx_pix, vy_pix, target_x, target_y
-                )
-
-                # KATMAN 4: Velocity Transform + Lead Prediction
-                omega_h_deg, omega_v_deg = self.velocity_transformer.pixel_velocity_to_angular(
-                    vx_comp_pix, vy_comp_pix
-                )
-                vx_real, vy_real = self.velocity_transformer.angular_to_real_velocity(
-                    omega_h_deg, omega_v_deg, depth_m
-                )
-                x_pix_pred, y_pix_pred = self.velocity_transformer.lead_prediction_pixel(
-                    target_x, target_y, vx_real, vy_real, depth_m, self.LEAD_TIME_BASE
-                )
-
-                # KATMAN 5: IBVS Control
-                error_x_pred = x_pix_pred - cx
-                error_y_pred = y_pix_pred - cy
-            else:
-                # ===== BASİT IBVS + Lead Prediction + Feedforward =====
-                depth_m = 5.0  # Sabit değer
-                
-                # Lead Prediction: Balonun ilerisine nişan al
-                predicted_x = target_x + vx_pix * self.LEAD_TIME_S
-                predicted_y = target_y + vy_pix * self.LEAD_TIME_S
-                
-                error_x_pred = predicted_x - cx
-                error_y_pred = predicted_y - cy
+            # Lead Prediction: Balonun ilerisine nişan al
+            predicted_x = target_x + vx_pix * self.LEAD_TIME_S
+            predicted_y = target_y + vy_pix * self.LEAD_TIME_S
+            
+            error_x_pred = predicted_x - cx
+            error_y_pred = predicted_y - cy
             
             error_x_norm = error_x_pred / (w / 2)
             error_y_norm = error_y_pred / (h / 2)
@@ -197,13 +133,13 @@ class BaseStageEngine:
                 dpan_deg = 0.0
                 dtilt_deg = 0.0
             else:
-                omega_pan_deg, omega_tilt_deg = self.ibvs_controller.compute_control_velocity(
+                dpan_cmd, dtilt_cmd = self.ibvs_controller.compute(
                     error_x_norm, error_y_norm
                 )
 
-                # Pan yönü tersine çevrildi (motor/kamera kurulumuna göre)
-                dpan_deg = -omega_pan_deg * dt
-                dtilt_deg = omega_tilt_deg * dt
+                # FOV ölçekleme: normalize hata → derece/saniye
+                dpan_deg = -dpan_cmd * (self.HFOV_DEG / 2) * dt
+                dtilt_deg = -dtilt_cmd * (self.VFOV_DEG / 2) * dt
                 
                 # ===== FEEDFORWARD: Hedefin hızını direkt motor komutuna ekle =====
                 # Piksel hızını derece/frame'e çevir ve ekle
@@ -211,7 +147,7 @@ class BaseStageEngine:
                 if ff_gain > 0 and (abs(vx_pix) > 1.0 or abs(vy_pix) > 1.0):
                     # Piksel hızı → açısal hız (derece/saniye) → derece/frame
                     ff_pan_deg = -(vx_pix * self.HFOV_DEG / w) * dt * ff_gain
-                    ff_tilt_deg = (vy_pix * self.VFOV_DEG / h) * dt * ff_gain
+                    ff_tilt_deg = -(vy_pix * self.VFOV_DEG / h) * dt * ff_gain
                     dpan_deg += ff_pan_deg
                     dtilt_deg += ff_tilt_deg
                 
@@ -284,7 +220,14 @@ class BaseStageEngine:
         )
 
     def get_frame_generator(self):
-        # ✅ DÜZELTİLDİ: track_video() + source parametresi
+        # Kamera ayarlarını sabitle
+        import cv2
+        cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.release()
+        
         return self.detector.track_video(
             source=self.camera_index, tracker="bytetrack.yaml"
         )
