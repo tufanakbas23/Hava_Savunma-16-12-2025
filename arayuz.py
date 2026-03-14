@@ -114,22 +114,8 @@ class Stage1Worker(QThread):
     def stop(self):
         self.engine.should_stop = True
 
-    def set_tracking(self, enabled: bool):
-        self.engine.tracking_enabled = enabled
-        if enabled:
-            self.engine.cycle_armed = True
-            self.engine.fire_requested = False
-
-    def request_fire(self):
-        self.engine.fire_requested = True
-
-    def reset_cycle(self):
-        self.engine.tracking_enabled = True
-        self.engine.fire_requested = False
-        self.engine.cycle_armed = True
-
     def run(self):
-        self.log.emit("Stage1 başlatıldı")
+        self.log.emit("Stage1 başlatıldı (Manuel Mod)")
         try:
             for frame, telem in self.engine.run():
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -526,15 +512,12 @@ class MainWindow(QMainWindow):
 
         self.btn_start = QPushButton("START")
         self.btn_stop = QPushButton("STOP")
-        self.btn_estop = QPushButton("E-STOP")
 
         self.btn_start.clicked.connect(self.on_start)
         self.btn_stop.clicked.connect(self.on_stop)
-        self.btn_estop.clicked.connect(self.on_estop)
 
         sys_layout.addWidget(self.btn_start, 1, 0)
         sys_layout.addWidget(self.btn_stop, 1, 1)
-        sys_layout.addWidget(self.btn_estop, 1, 2)
 
         layout.addWidget(sys_box)
 
@@ -546,9 +529,13 @@ class MainWindow(QMainWindow):
         self.lbl_fps = QLabel("FPS: -")
         self.lbl_lock = QLabel("LOCK: -")
         self.lbl_target = QLabel("Target: -")
+        self.lbl_depth = QLabel("Depth: -")
+        self.lbl_class = QLabel("Class: -")
+        self.lbl_detections = QLabel("Detections: 0")
 
         for i, lbl in enumerate(
-            [self.lbl_stage, self.lbl_fps, self.lbl_lock, self.lbl_target]
+            [self.lbl_stage, self.lbl_fps, self.lbl_lock, self.lbl_target,
+             self.lbl_depth, self.lbl_class, self.lbl_detections]
         ):
             lbl.setStyleSheet("font-size:10pt; font-weight:bold;")
             telem_layout.addWidget(lbl, i, 0)
@@ -586,39 +573,23 @@ class MainWindow(QMainWindow):
         return tab
 
     def create_stage1_controls(self):
-        box = QGroupBox("Stage 1 - Kontrol")
-        layout = QGridLayout(box)
+        box = QGroupBox("Stage 1 — Manuel Algılama")
+        layout = QVBoxLayout(box)
 
-        # Mod seçimi
-        self.btn_manual = QPushButton("MANUEL")
-        self.btn_autonomous = QPushButton("OTONOM")
-        self.btn_manual.setCheckable(True)
-        self.btn_autonomous.setCheckable(True)
-        self.btn_manual.setChecked(True)  # Varsayılan manuel
-        
-        self.btn_manual.clicked.connect(self.on_manual_mode)
-        self.btn_autonomous.clicked.connect(self.on_autonomous_mode)
-        
-        layout.addWidget(self.btn_manual, 0, 0)
-        layout.addWidget(self.btn_autonomous, 0, 1)
+        # Bilgi etiketi
+        info = QLabel(
+            "🎯 MANUEL MOD\n"
+            "YOLO algılama + ZED mesafe aktif\n"
+            "Joystick ile manuel hizalama yapın"
+        )
+        info.setStyleSheet("font-size:10pt; color:#00ccff; font-weight:bold;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
 
-        # Tracking kontrolleri (sadece otonom modda aktif)
-        self.btn_track = QPushButton("Track (S)")
-        self.btn_fire = QPushButton("Fire (F)")
-        self.btn_next = QPushButton("Next (N)")
-
-        self.btn_track.clicked.connect(self.on_track)
-        self.btn_fire.clicked.connect(self.on_fire)
-        self.btn_next.clicked.connect(self.on_next)
-
-        layout.addWidget(self.btn_track, 1, 0)
-        layout.addWidget(self.btn_fire, 1, 1)
-        layout.addWidget(self.btn_next, 2, 0, 1, 2)
-        
-        # Mod durumu etiketi
+        # Mod durumu
         self.lbl_mode = QLabel("Mod: MANUEL (Joystick aktif)")
-        self.lbl_mode.setStyleSheet("font-size:9pt; color:#888;")
-        layout.addWidget(self.lbl_mode, 3, 0, 1, 2)
+        self.lbl_mode.setStyleSheet("font-size:9pt; color:#00ff00;")
+        layout.addWidget(self.lbl_mode)
 
         return box
 
@@ -771,9 +742,6 @@ class MainWindow(QMainWindow):
         )
 
     def setup_shortcuts(self):
-        QShortcut(QKeySequence("S"), self, self.on_track)
-        QShortcut(QKeySequence("F"), self, self.on_fire)
-        QShortcut(QKeySequence("N"), self, self.on_next)
         QShortcut(QKeySequence("Return"), self, self.on_stage3_cycle)
 
     def on_tab_changed(self, index):
@@ -885,70 +853,6 @@ class MainWindow(QMainWindow):
 
             self.append_log("Durduruldu")
 
-    @Slot()
-    def on_estop(self):
-        self.append_log("ACIL DURDUR!")
-        if self.worker:
-            if self.active_stage == 1:
-                self.worker.engine.tracking_enabled = False
-                self.worker.engine.fire_requested = False
-            elif self.active_stage == 2:
-                self.worker.engine.auto_tracking_enabled = False
-            elif self.active_stage == 3:
-                self.worker.engine.state = "IDLE"
-
-        if self.arduino:
-            self.arduino.send(fire=False)
-            # ✅ Acil durum, LED'i söndür
-            self.arduino.send_stage_led(0)
-
-    @Slot()
-    def on_track(self):
-        if self.worker and self.active_stage == 1:
-            self.worker.set_tracking(True)
-            self.append_log("Takip baslatildi")
-
-    @Slot()
-    def on_fire(self):
-        if self.worker and self.active_stage == 1:
-            self.worker.request_fire()
-            self.append_log("Ates istendi")
-
-    @Slot()
-    def on_next(self):
-        if self.worker and self.active_stage == 1:
-            self.worker.reset_cycle()
-            self.append_log("Cycle reset")
-
-    @Slot()
-    def on_manual_mode(self):
-        """Manuel moda geç - Joystick kontrolü aktif"""
-        self.btn_manual.setChecked(True)
-        self.btn_autonomous.setChecked(False)
-        
-        if self.arduino:
-            self.arduino.set_mode(autonomous=False)
-        
-        # Tracking'i kapat
-        if self.worker and self.active_stage == 1:
-            self.worker.set_tracking(False)
-        
-        self.lbl_mode.setText("Mod: MANUEL (Joystick aktif)")
-        self.lbl_mode.setStyleSheet("font-size:9pt; color:#00ff00;")
-        self.append_log("MANUEL mod - Joystick kontrolü aktif")
-
-    @Slot()
-    def on_autonomous_mode(self):
-        """Otonom moda geç - Python/IBVS kontrolü aktif"""
-        self.btn_manual.setChecked(False)
-        self.btn_autonomous.setChecked(True)
-        
-        if self.arduino:
-            self.arduino.set_mode(autonomous=True)
-        
-        self.lbl_mode.setText("Mod: OTONOM (Python kontrolü)")
-        self.lbl_mode.setStyleSheet("font-size:9pt; color:#00aaff;")
-        self.append_log("OTONOM mod - Python kontrolü aktif. Track butonuna basın.")
 
     @Slot(bool)
     def on_auto(self, enabled: bool):
@@ -996,21 +900,54 @@ class MainWindow(QMainWindow):
         lock_text = "YES" if locked else "NO" if locked is not None else "-"
         self.lbl_lock.setText(f"LOCK: {lock_text}")
 
+        # ─── Depth (Phase 1.2) ───
+        depth_m = t.get("target_depth_m", None)
+        if depth_m is not None:
+            depth_color = "#00ff00" if depth_m > 1.0 else "#ff4444"
+            self.lbl_depth.setText(f"Depth: {depth_m:.2f} m")
+            self.lbl_depth.setStyleSheet(f"font-size:10pt; font-weight:bold; color:{depth_color};")
+        else:
+            self.lbl_depth.setText("Depth: -")
+            self.lbl_depth.setStyleSheet("font-size:10pt; font-weight:bold;")
+
+        # ─── Detection Count ───
+        det_count = t.get("detection_count", 0)
+        self.lbl_detections.setText(f"Detections: {det_count}")
+
         if self.active_stage == 1:
-            target_str = (
-                f"ID:{t.get('target_id')} {t.get('target_size')}"
-                if t.get("have_target")
-                else "None"
-            )
+            # Target: Class + ID + Size + Depth
+            if t.get("have_target"):
+                cls_name = t.get('target_class', '?').upper()
+                tid = t.get('target_id', '?')
+                size = t.get('target_size', '?')
+                depth_str = f"{depth_m:.1f}m" if depth_m else "?"
+                target_str = f"{cls_name} ID:{tid} {size} D:{depth_str}"
+            else:
+                target_str = "None"
             self.lbl_target.setText(f"Target: {target_str}")
 
+            # Class label
+            cls_name = t.get('target_class', '-')
+            self.lbl_class.setText(f"Class: {cls_name.upper() if cls_name else '-'}")
+
         elif self.active_stage == 2:
-            target_str = (
-                f"ID:{t.get('target_id')} {t.get('target_size')} [{t.get('target_color')}]"
-                if t.get("have_target")
-                else "None"
-            )
+            # Stage 2: Otonom swarm + yaklaşan hedef
+            if t.get("have_target"):
+                cls_name = (t.get("target_class") or "?").upper()
+                tid = t.get("target_id", "?")
+                vz = t.get("target_vz_mps", 0.0) or 0.0
+                depth_str = f"{depth_m:.1f}m" if depth_m else "?"
+                target_str = f"{cls_name} ID:{tid} D:{depth_str} Vz:{vz:+.2f}m/s"
+            else:
+                target_str = "None"
             self.lbl_target.setText(f"Target: {target_str}")
+
+            cls_name = t.get("target_class")
+            self.lbl_class.setText(
+                f"Class: {cls_name.upper() if cls_name else '-'} | "
+                f"Engaged: {'YES' if t.get('engaged') else 'NO'} | "
+                f"Approaching: {t.get('approaching_count', 0)}"
+            )
 
         elif self.active_stage == 3:
             state = t.get("state", "IDLE")
@@ -1022,7 +959,6 @@ class MainWindow(QMainWindow):
                 f"Color: {t.get('color', '-')}"
             )
             self.lbl_target.setText(f"Target: {t.get('target_id', '-')}")
-
     def closeEvent(self, event):
         try:
             if self.worker and self.worker.isRunning():

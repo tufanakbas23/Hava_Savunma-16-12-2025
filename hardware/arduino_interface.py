@@ -192,6 +192,45 @@ class ArduinoInterface:
         except SerialException as e:
             print(f"[WARN] Seri yazma hatası: {e}")
     
+    def send_error_packet(self, error_x_norm: float, error_y_norm: float):
+        """
+        Hata tabanlı UART paketi gönder (Stage 2 - PID hizalama için).
+
+        Paket formatı (ASCII, satır sonu ile biter):
+            E{EX},Y{EY}
+
+        Burada:
+            EX = Error_X * 1000, işaretli 16-bit tamsayı (-32768..32767)
+            EY = Error_Y * 1000, işaretli 16-bit tamsayı (-32768..32767)
+
+        Örnek:
+            E+0123,Y-0456\\n  →  Error_X = +0.123, Error_Y = -0.456
+
+        Not:
+            - Error_X ve Error_Y, görüntü merkezine göre normalize hatalar
+              ([-1, 1] aralığında) olarak düşünülmelidir.
+            - Bu metod C++ tarafında çok hafif bir parse ile PID setpoint
+              üretimi için tasarlanmıştır.
+        """
+        if self.ser is None:
+            return
+
+        try:
+            # Normalize hataları işaretli 16-bit tam sayıya ölçekle
+            scale = 1000.0
+            ex = int(self._clamp(error_x_norm * scale, -32768, 32767))
+            ey = int(self._clamp(error_y_norm * scale, -32768, 32767))
+
+            # Sabit genişlikli, işaretli format (±NNNNN)
+            ex_str = f"{ex:+06d}"  # örn: +0123, -0456
+            ey_str = f"{ey:+06d}"
+
+            packet = f"E{ex_str},Y{ey_str}\n"
+            self.ser.write(packet.encode("ascii"))
+
+        except SerialException as e:
+            print(f"[WARN] Seri yazma hatası (error_packet): {e}")
+    
     def _update_omega(self):
         """Açısal hızı hesapla."""
         now = time.time()

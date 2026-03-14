@@ -59,6 +59,28 @@ float currentTiltDeg = 0.0;
 char cmdBuf[32];
 uint8_t cmdLen = 0;
 
+// ============== Stage 2: Error_X / Error_Y tabanlı PD kontrol ==============
+// Python tarafı: E+0123,Y-0456 → Error_X/Y_norm ≈ ±0.123, ±0.456
+
+float kp_pan  = 0.08f;
+float kd_pan  = 0.02f;
+float kp_tilt = 0.08f;
+float kd_tilt = 0.02f;
+
+float last_err_pan  = 0.0f;
+float last_err_tilt = 0.0f;
+unsigned long last_err_time_ms = 0;
+
+// ==================== İLERİ DEKLARASYON ====================
+void processCmd(const char* cmd);
+void parsePosition(const char* cmd);
+void parseErrorPacket(const char* cmd);
+void sendStatus();
+void runAutonomous();
+float readAxis(int pin, float maxSpeed, float minSpeed);
+void runManual();
+void checkButton();
+
 // ==================== SETUP ====================
 
 void setup()
@@ -91,7 +113,28 @@ void setup()
 void loop()
 {
     // Serial komutları her zaman kontrol et
-    checkSerial();
+    while (Serial.available())
+    {
+        char c = Serial.read();
+        
+        if (c == '\n' || c == '\r')
+        {
+            if (cmdLen > 0)
+            {
+                cmdBuf[cmdLen] = '\0';
+                processCmd(cmdBuf);
+                cmdLen = 0;
+            }
+        }
+        else if (cmdLen < (sizeof(cmdBuf) - 1))  // Buffer overflow koruması
+        {
+            cmdBuf[cmdLen++] = c;
+        }
+        else
+        {
+            cmdLen = 0;  // Taşma → sıfırla
+        }
+    }
     
     if (autonomousMode)
     {
@@ -109,32 +152,6 @@ void loop()
 }
 
 // ==================== SERİ KOMUT ====================
-
-void checkSerial()
-{
-    while (Serial.available())
-    {
-        char c = Serial.read();
-        
-        if (c == '\n' || c == '\r')
-        {
-            if (cmdLen > 0)
-            {
-                cmdBuf[cmdLen] = '\0';
-                processCmd(cmdBuf);
-                cmdLen = 0;
-            }
-        }
-        else if (cmdLen < 30)  // Buffer overflow koruması
-        {
-            cmdBuf[cmdLen++] = c;
-        }
-        else
-        {
-            cmdLen = 0;  // Taşma → sıfırla
-        }
-    }
-}
 
 void processCmd(const char* cmd)
 {
@@ -164,7 +181,7 @@ void processCmd(const char* cmd)
         return;
     }
     
-    // Stage LED (0-3)
+    // Stage LED (0-3) — sadece status/ack için
     if (cmd[0] >= '0' && cmd[0] <= '3' && cmd[1] == '\0')
     {
         Serial.print(F("OK,S"));
@@ -176,6 +193,13 @@ void processCmd(const char* cmd)
     if (cmd[0] == 'P')
     {
         parsePosition(cmd);
+        return;
+    }
+
+    // Hata tabanlı hedef: E{EX},Y{EY}  (Stage 2 - Error_X, Error_Y normalize)
+    if (cmd[0] == 'E')
+    {
+        parseErrorPacket(cmd);
         return;
     }
 }
@@ -206,6 +230,63 @@ void parsePosition(const char* cmd)
     Serial.print((int)(currentPanDeg * 10));
     Serial.print(F(",T"));
     Serial.println((int)(currentTiltDeg * 10));
+}
+
+// Stage 2 için: Error_X / Error_Y normalize paketini parse et
+// Format:  E+0123,Y-0456
+// EX, EY = Error_*_norm * 1000  (işaretli tam sayı)
+void parseErrorPacket(const char* cmd)
+{
+    const char* ex_ptr = cmd + 1;           // 'E' den sonrası (+/- rakamlar)
+    const char* comma  = strchr(cmd, ',');
+    if (!comma) return;
+
+    const char* y_ptr = strchr(cmd, 'Y');
+    if (!y_ptr) return;
+    const char* ey_ptr = y_ptr + 1;         // 'Y' den sonrası
+
+    // Küçük parse: işaret + rakamlar → int
+    int ex = atol(ex_ptr);   // örn: +0123 → 123, -0456 → -456
+    int ey = atol(ey_ptr);
+
+    // Normalize geri ölçekle
+    float err_pan_norm  = (float)ex / 1000.0f;  // Error_X
+    float err_tilt_norm = (float)ey / 1000.0f;  // Error_Y
+
+    // Zaman farkı
+    unsigned long now_ms = millis();
+    float dt_s = 0.0f;
+    if (last_err_time_ms > 0)
+    {
+        unsigned long dt_ms = now_ms - last_err_time_ms;
+        if (dt_ms > 0) dt_s = (float)dt_ms / 1000.0f;
+    }
+    last_err_time_ms = now_ms;
+
+    // Türev terimi
+    float d_err_pan  = (dt_s > 0.0f) ? (err_pan_norm  - last_err_pan)  / dt_s : 0.0f;
+    float d_err_tilt = (dt_s > 0.0f) ? (err_tilt_norm - last_err_tilt) / dt_s : 0.0f;
+
+    last_err_pan  = err_pan_norm;
+    last_err_tilt = err_tilt_norm;
+
+    // Normalize hatayı dereceye çevir (ZED HFOV/VFOV tahmini)
+    const float HFOV_DEG = 78.0f;
+    const float VFOV_DEG = 50.0f;
+
+    float err_pan_deg  = err_pan_norm  * (HFOV_DEG / 2.0f);
+    float err_tilt_deg = err_tilt_norm * (VFOV_DEG / 2.0f);
+
+    // Basit PD: hedef açılara küçük düzeltme ekle
+    float delta_pan_deg  = -(kp_pan  * err_pan_deg  + kd_pan  * d_err_pan);
+    float delta_tilt_deg = -(kp_tilt * err_tilt_deg + kd_tilt * d_err_tilt);
+
+    targetPanDeg  += delta_pan_deg;
+    targetTiltDeg += delta_tilt_deg;
+
+    // Limitler içinde tut
+    targetPanDeg  = constrain(targetPanDeg,  PAN_MIN_DEG,  PAN_MAX_DEG);
+    targetTiltDeg = constrain(targetTiltDeg, TILT_MIN_DEG, TILT_MAX_DEG);
 }
 
 void sendStatus()

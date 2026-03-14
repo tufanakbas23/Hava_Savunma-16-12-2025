@@ -1,5 +1,6 @@
 """
 Base Stage Engine - Basit P Kontrol + Lead Prediction + Feedforward
+ZED 2 kamera desteği ile (Phase 1.1+)
 """
 
 import time
@@ -10,18 +11,36 @@ from classify.size_classifier import SizeClassifier
 from control.ibvs_controller import IBVSController
 from config.system_config import SystemConfig
 
+# ZED kamera opsiyonel import
+try:
+    from camera.zed_camera import ZedCamera, ZED_AVAILABLE
+except ImportError:
+    ZED_AVAILABLE = False
+
 
 class BaseStageEngine:
     """
     Tüm stage'lerin base class'ı
     Belgede: Depth-aware IBVS sistemi
+    Phase 1.1+: ZED 2 kamera desteği (USE_ZED_CAMERA = True)
     """
 
     def __init__(self, model_path, arduino, camera_index=0):
-        self.detector = YoloDetector(model_path, device=0, use_half=True)
+        self.detector = YoloDetector(
+            model_path,
+            device=SystemConfig.YOLO_DEVICE,
+            use_half=SystemConfig.YOLO_HALF,
+            conf=SystemConfig.YOLO_CONF_THRESHOLD,
+            imgsz=SystemConfig.YOLO_IMGSZ,
+            active_classes=SystemConfig.ACTIVE_CLASSES,
+        )
         self.size_classifier = SizeClassifier(large_threshold=10000)
         self.arduino = arduino
         self.camera_index = camera_index
+
+        # ===== ZED KAMERA DESTEĞİ (Phase 1.1) =====
+        self.use_zed = SystemConfig.USE_ZED_CAMERA and ZED_AVAILABLE
+        self.zed_camera = None  # ZED kullanılacaksa run() içinde açılır
 
         # ===== KAMERA MODU (SystemConfig'den) =====
         self.camera_on_turret = SystemConfig.CAMERA_ON_TURRET
@@ -51,8 +70,9 @@ class BaseStageEngine:
         self.prev_time = time.time()
         self.frame_counter = 0
 
+        cam_source = "ZED 2" if self.use_zed else "OpenCV"
         cam_mode = "HAREKETLİ (IBVS)" if self.camera_on_turret else "SABİT (P kontrol)"
-        print(f"[BaseStage] Kamera modu: {cam_mode}")
+        print(f"[BaseStage] Kamera: {cam_source} | Mod: {cam_mode}")
 
     def calculate_fps(self):
         now = time.time()
@@ -220,7 +240,7 @@ class BaseStageEngine:
         )
 
     def get_frame_generator(self):
-        # Kamera ayarlarını sabitle
+        """OpenCV stream modu — mevcut pipeline uyumluluğu."""
         import cv2
         cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -232,5 +252,41 @@ class BaseStageEngine:
             source=self.camera_index, tracker="bytetrack.yaml"
         )
 
+    # ─────────────────── ZED Kamera Yardımcıları (Phase 1.1) ───────────────────
+
+    def open_zed_camera(self):
+        """ZED kamerasını açar (child stage'ler tarafından çağrılır)."""
+        if not self.use_zed:
+            return
+        if self.zed_camera is not None:
+            return  # Zaten açık
+
+        self.zed_camera = ZedCamera(
+            resolution=SystemConfig.ZED_RESOLUTION,
+            fps=SystemConfig.ZED_FPS,
+            depth_mode=SystemConfig.ZED_DEPTH_MODE,
+            max_depth_m=SystemConfig.ZED_MAX_DEPTH_M,
+        )
+        self.zed_camera.open()
+
+    def close_zed_camera(self):
+        """ZED kamerasını güvenli şekilde kapatır."""
+        if self.zed_camera is not None:
+            self.zed_camera.close()
+            self.zed_camera = None
+
+    def grab_zed_frame(self):
+        """
+        ZED kameradan tek frame alır.
+
+        Returns:
+            (frame, depth): BGR np.ndarray + sl.Mat depth
+            Frame alınamazsa (None, None) döner.
+        """
+        if self.zed_camera is not None:
+            return self.zed_camera.grab_frame()
+        return None, None
+
     def run(self):
         raise NotImplementedError("Her stage kendi run() metodunu implement etmeli!")
+
