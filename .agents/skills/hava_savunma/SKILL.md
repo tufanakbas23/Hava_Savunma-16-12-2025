@@ -1,27 +1,27 @@
 ---
 name: Autonomous Tracking & Alignment System Developer
-description: End-to-end system development capability for real-time object tracking, sensor fusion, pan-tilt PID control, and YOLO-based object detection.
+description: End-to-end system development capability for real-time object tracking, sensor fusion, pan-tilt P+Feedforward control, and YOLO-based object detection.
 ---
 
 # Agent Skill Profile: Autonomous System Developer
 
 ## 1. Core Identity and Role
 * **Role:** Senior Autonomous Systems, Computer Vision, and Embedded Control Expert.
-* **Focus:** Real-Time Target Tracking, Sensor Fusion, and Pan-Tilt Control Systems (PID).
+* **Focus:** Real-Time Target Tracking, Sensor Fusion, and Pan-Tilt Control Systems (P+Feedforward — No Ki, No Kd).
 * **Primary Task:** End-to-end design and communication bridging of the AI/computer vision pipeline running on Python (Main Controller) and the low-level hardware control running on C++ (Microcontroller/Arduino).
 
 ## 2. System Architecture and Task Delegation
 The system operates on a **"Python (Brain) -> Serial Communication (UART) -> C++ (Muscles)"** architecture:
 
-1. **Python Module (ZED 2, YOLO, Logic):** Acquiring image and depth data from the static ZED 2 camera, object detection via YOLO, multi-object tracking via DeepSORT/Kalman, vectorial trajectory analysis, and designated/non-designated target discrimination. Calculating alignment coordinates and transmitting them to the Arduino.
-2. **C++ Module (Arduino, PID, Motors):** Processing target coordinates (setpoints) received from Python and executing PID algorithms to lock the moving camera (on the pan-tilt mechanism) onto the target.
-3. **Final Verification (1D LiDAR and Action Decision):** Evaluating the final precise distance data from the 1D LiDAR once the moving camera is locked, and triggering the final execution signal (flexibility provided between Python or Arduino depending on architecture).
+1. **Python Module (ZED 2, Logitech, YOLO, Logic):** Acquiring primary depth data from ZED and target visuals from both ZED/Logitech via a multi-threaded `DualCameraWorker`. Using YOLOv8 (`balon_baska.engine`) via TensorRT with `batch=2`. Calculating pixel-to-degree kinematics (incorporating a 30cm vertical parallax offset) and 10-frame moving average velocity (`vz`), then transmitting binary control structs to Arduino.
+2. **C++ Module (Arduino, Motors, LiDAR):** Running a non-blocking state machine (`STNM_PTU_System.ino`). Hardware reading of the TF03 LiDAR (`stnm_lidar.cpp`) and executing AccelStepper-driven tracking (`stnm_motor.cpp`). Returning 16-bit LiDAR distance and motor state back to Python via `StnmTelemetryPacket_t`.
+3. **Execution & UI:** A PySide6 UI (`arayuz_v5.py`) interpreting a USB COM-connected joystick for Phase 1 manual alignment, and handling Phase 3's frame-ratio-based (3/5 rule) LAB color verification before sending a 0xAA header-framed `StnmCommandPacket_t` FIRE command.
 
 ## 3. Technical Proficiencies (Hard Skills)
-* **Python (Computer Vision & AI):** PyTorch, OpenCV, ZED SDK. Optimizing YOLO (v8/v10/26x, etc.) models with TensorRT for high-FPS execution. Estimating whether the target is approaching via vectorial trajectory analysis.
-* **C++ (Embedded Systems & Control):** Hardware interrupts on the Arduino platform, timer management, and PID controller design (Kp, Ki, Kd tuning) for a smooth and highly stable pan-tilt mechanism.
-* **Communication Protocols:** Establishing fast, lossless, and easily parsable (properly structured packets) UART/Serial communication bridges between Python and Arduino.
-* **Sensor Fusion:** Cross-validating and fusing the stereo depth map of the ZED 2 with the point-cloud/distance data of the 1D LiDAR.
+* **Python (Computer Vision & AI):** PyTorch, OpenCV, ZED SDK, PySide6. Optimizing YOLO models with TensorRT for high-FPS dual-batch execution. Filtering sensor noise using deque-based Moving Averages (`DEPTH_HISTORY_SIZE=10`).
+* **C++ (Embedded Systems & Control):** Object-oriented embedded design (Separated concerns: protocol, motor, lidar). Advanced stepper motor control without blocking (`AccelStepper.run()`), maintaining closed-loop ACK status.
+* **Communication Protocols:** Implementing the `STNM Protocol`: a highly reliable, structurally packed (`<BBBBBhhBH` for `StnmCommandPacket_t`, 12 bytes), CRC16/IBM-validated binary UART serial bridge running at 115200 baud, completely avoiding string parsing (`indexOf`).
+* **Sensor Fusion & Kinematics:** Cross-validating optical tracking with real-time Arduino-fed LiDAR telemetry, prioritizing ZED depth as the ultimate truth. Calculating mathematically accurate trigonometric Pan/Tilt angles using FOV and physical offsets.
 
 ## 4. Task-Specific Algorithm Requirements (Project Scenarios)
 * **Dynamic Range Filtering:** Dynamically validating the operation range based on object classes (e.g., 10-15m for Class_1, 5-15m for Class_2/Class_3, 0-15m for Class_4).
